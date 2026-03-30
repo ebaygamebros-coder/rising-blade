@@ -7,4 +7,6 @@ __pycache__/
 *.log
 *.md
 rising_world_members.db
+rising_world_forum.db
+wiki_articles.db
 agent_context.md
