@@ -8,9 +8,13 @@ async def scrape_new_posts():
     conn = sqlite3.connect('rising_world_forum.db')
     cursor = conn.cursor()
     
-    # Get existing thread URLs to know which to check
+    # Get existing thread URLs
     cursor.execute('SELECT id, url FROM threads')
     thread_map = {row[1]: row[0] for row in cursor.fetchall()}
+    
+    # Get board URLs
+    cursor.execute('SELECT id, url FROM boards')
+    board_map = {row[1]: row[0] for row in cursor.fetchall()}
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -21,24 +25,32 @@ async def scrape_new_posts():
         stealth_instance = Stealth()
         await stealth_instance.apply_stealth_async(page)
         
-        print("Checking for updates in threads...")
+        print("Checking for updates in forum sections...")
         
-        # Check the first few pages of the 'Discussions (English)' board for active threads
-        # You could extend this to all boards if needed
-        url = "https://forum.rising-world.net/board/34-discussions-english/"
-        await page.goto(url, timeout=60000)
-        
-        threads = await page.evaluate('''() => {
-            return Array.from(document.querySelectorAll('a'))
-                .filter(a => a.href.includes('/thread/'))
-                .map(a => ({ title: a.innerText.trim(), url: a.href }));
-        }''')
-        
-        for thread in threads:
-            if thread['url'] in thread_map:
-                thread_id = thread_map[thread['url']]
+        # Iterate through boards to check for new threads/posts
+        for board_url, board_id in board_map.items():
+            print(f"Checking board: {board_url}")
+            await page.goto(board_url, timeout=60000)
+            await asyncio.sleep(random.uniform(3, 7))
+            
+            threads = await page.evaluate('''() => {
+                const anchors = Array.from(document.querySelectorAll('h3 > a[href*="/thread/"]'));
+                return anchors.map(a => ({ title: a.innerText.trim(), url: a.href }));
+            }''')
+            
+            for thread in threads:
+                if thread['url'] not in thread_map:
+                    # New thread found
+                    cursor.execute('INSERT INTO threads (board_id, title, url) VALUES (?, ?, ?)', 
+                                   (board_id, thread['title'], thread['url']))
+                    conn.commit()
+                    thread_id = cursor.lastrowid
+                    thread_map[thread['url']] = thread_id
+                    print(f"  New thread found: {thread['title']}")
+                else:
+                    thread_id = thread_map[thread['url']]
                 
-                # Check for new posts in this thread
+                # Check for updates in the thread
                 await page.goto(thread['url'], timeout=60000)
                 await asyncio.sleep(random.uniform(2, 5))
                 
@@ -46,18 +58,17 @@ async def scrape_new_posts():
                     return Array.from(document.querySelectorAll('article.message')).map(post => ({
                         author: post.querySelector('.username')?.innerText.trim(),
                         content: post.querySelector('.messageBody')?.innerText.trim(),
-                        timestamp: post.querySelector('time')?.getAttribute('datetime')
+                        timestamp: post.querySelector('.messagePublicationTime time')?.getAttribute('datetime')
                     }));
                 }''')
                 
-                # Add posts that aren't already in DB for this thread
                 for post in posts:
                     cursor.execute('SELECT id FROM posts WHERE thread_id=? AND timestamp=? AND author=?', 
                                    (thread_id, post['timestamp'], post['author']))
                     if not cursor.fetchone():
                         cursor.execute('INSERT INTO posts (thread_id, author, content, timestamp) VALUES (?, ?, ?, ?)', 
                                        (thread_id, post['author'], post['content'], post['timestamp']))
-                        print(f"Added new post in thread: {thread['title']} by {post['author']}")
+                        print(f"    Added new post by {post['author']}")
                 conn.commit()
         
         await browser.close()
