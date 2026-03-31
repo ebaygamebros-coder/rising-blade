@@ -27,11 +27,10 @@ async def scrape_new_posts():
         
         print("Checking for updates in forum sections...")
         
-        # Iterate through boards to check for new threads/posts
         for board_url, board_id in board_map.items():
             print(f"Checking board: {board_url}")
             await page.goto(board_url, timeout=60000)
-            await asyncio.sleep(random.uniform(3, 7))
+            await asyncio.sleep(random.uniform(1, 3)) # Faster speed
             
             threads = await page.evaluate('''() => {
                 const anchors = Array.from(document.querySelectorAll('h3 > a[href*="/thread/"]'));
@@ -40,7 +39,6 @@ async def scrape_new_posts():
             
             for thread in threads:
                 if thread['url'] not in thread_map:
-                    # New thread found
                     cursor.execute('INSERT INTO threads (board_id, title, url) VALUES (?, ?, ?)', 
                                    (board_id, thread['title'], thread['url']))
                     conn.commit()
@@ -50,9 +48,8 @@ async def scrape_new_posts():
                 else:
                     thread_id = thread_map[thread['url']]
                 
-                # Check for updates in the thread
                 await page.goto(thread['url'], timeout=60000)
-                await asyncio.sleep(random.uniform(2, 5))
+                await asyncio.sleep(random.uniform(1, 2)) # Faster speed
                 
                 posts = await page.evaluate('''() => {
                     return Array.from(document.querySelectorAll('article.message')).map(post => ({
