@@ -29,8 +29,12 @@ async def scrape_new_posts():
         
         for board_url, board_id in board_map.items():
             print(f"Checking board: {board_url}")
-            await page.goto(board_url, timeout=60000)
-            await asyncio.sleep(random.uniform(1, 3)) # Faster speed
+            try:
+                await page.goto(board_url, timeout=60000, wait_until='domcontentloaded')
+                await asyncio.sleep(random.uniform(2, 5)) # Increased sleep
+            except Exception as e:
+                print(f"  Error loading board {board_url}: {e}")
+                continue
             
             threads = await page.evaluate('''() => {
                 const anchors = Array.from(document.querySelectorAll('h3 > a[href*="/thread/"]'));
@@ -48,8 +52,21 @@ async def scrape_new_posts():
                 else:
                     thread_id = thread_map[thread['url']]
                 
-                await page.goto(thread['url'], timeout=60000)
-                await asyncio.sleep(random.uniform(1, 2)) # Faster speed
+                # Retry logic for thread navigation
+                success = False
+                for i in range(3):
+                    try:
+                        await page.goto(thread['url'], timeout=60000, wait_until='domcontentloaded')
+                        await asyncio.sleep(random.uniform(2, 4)) # Increased sleep
+                        success = True
+                        break
+                    except Exception as e:
+                        print(f"    Attempt {i+1} failed for {thread['url']}: {e}")
+                        await asyncio.sleep(10)
+                
+                if not success:
+                    print(f"    Skipping thread due to navigation failure: {thread['url']}")
+                    continue
                 
                 posts = await page.evaluate('''() => {
                     return Array.from(document.querySelectorAll('article.message')).map(post => ({
