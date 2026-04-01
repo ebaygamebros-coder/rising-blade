@@ -7,7 +7,7 @@ def create_database():
     # Define schema based on member information structure
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS members (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             rank TEXT,
             gender TEXT,

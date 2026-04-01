@@ -1,13 +1,34 @@
 import asyncio
 import sqlite3
 import random
+import os
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 async def scrape_new_members():
-    conn = sqlite3.connect('rising_world_members.db')
+    db_path = os.path.join(os.getcwd(), 'rising_world_members.db')
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
+    # 1. Integrity check: Verify if table exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='members';")
+    if not cursor.fetchone():
+        print("Error: 'members' table does not exist. Initializing...")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                rank TEXT,
+                gender TEXT,
+                member_since TEXT,
+                website TEXT,
+                posts INTEGER,
+                reactions_received INTEGER,
+                points INTEGER
+            )
+        ''')
+        conn.commit()
+
     # Get existing usernames
     cursor.execute('SELECT username FROM members')
     existing_usernames = {row[0] for row in cursor.fetchall()}
@@ -21,8 +42,6 @@ async def scrape_new_members():
         stealth_instance = Stealth()
         await stealth_instance.apply_stealth_async(page)
         
-        # We only need to check from the first page until we hit members already in the DB
-        # To be safe, we'll check the first 5 pages, as that's where newest members appear
         for page_no in range(1, 6):
             url = f"https://www.rising-world.net/members-list/?pageNo={page_no}&sortField=registrationDate&sortOrder=DESC&letter="
             print(f"Checking for new members on page {page_no}...")

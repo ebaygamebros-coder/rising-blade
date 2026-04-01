@@ -4,7 +4,11 @@ import random
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
-async def scrape_steam_thread(url, thread_id, cursor, conn):
+async def scrape_steam_thread(url, thread_id):
+    # Establish a fresh connection inside the thread scraper for guaranteed persistence
+    conn = sqlite3.connect('steam_forum.db')
+    cursor = conn.cursor()
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -28,38 +32,29 @@ async def scrape_steam_thread(url, thread_id, cursor, conn):
                 }));
             }''')
             
-            print(f"    Extracted {len(posts)} posts.")
+            print(f"    Extracted {len(posts)} posts for thread ID {thread_id}.")
             
             for post in posts:
-                # Add to DB, ensure author/content is valid
                 if post['author'] and post['content']:
-                    # Use INSERT INTO explicitly
                     cursor.execute('INSERT INTO posts (thread_id, author, content, timestamp) VALUES (?, ?, ?, ?)', 
                                    (thread_id, post['author'], post['content'], post['timestamp']))
-            # Force commit
             conn.commit()
-            print("    Committed posts to database.")
+            print("    Committed posts.")
         except Exception as e:
             print(f"Error scraping thread {url}: {e}")
             
         await browser.close()
+    conn.close()
 
 async def scrape_steam_forum():
     conn = sqlite3.connect('steam_forum.db')
     cursor = conn.cursor()
     
-    # Pre-defined Steam sub-forums for Rising World
     boards = [
         {"name": "General Discussions", "url": "https://steamcommunity.com/app/324080/discussions/"},
         {"name": "Suggestions", "url": "https://steamcommunity.com/app/324080/discussions/12/"},
         {"name": "Offtopic", "url": "https://steamcommunity.com/app/324080/discussions/16/"}
     ]
-    
-    # Ensure tables exist
-    cursor.execute('''CREATE TABLE IF NOT EXISTS boards (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, url TEXT UNIQUE)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS threads (id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER, title TEXT, url TEXT UNIQUE, last_activity TEXT, FOREIGN KEY(board_id) REFERENCES boards(id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER, author TEXT, content TEXT, timestamp TEXT, FOREIGN KEY(thread_id) REFERENCES threads(id))''')
-    conn.commit()
     
     for board in boards:
         cursor.execute('INSERT OR IGNORE INTO boards (name, url) VALUES (?, ?)', (board['name'], board['url']))
@@ -75,18 +70,11 @@ async def scrape_steam_forum():
         await stealth_instance.apply_stealth_async(page)
         
         for board in boards:
-            # Fetch ID
-            row = cursor.execute('SELECT id FROM boards WHERE url=?', (board['url'],)).fetchone()
-            if row:
-                board_id = row[0]
-            else:
-                continue
-            
+            board_id = cursor.execute('SELECT id FROM boards WHERE url=?', (board['url'],)).fetchone()[0]
             print(f"Scraping board: {board['name']}")
             await page.goto(board['url'], timeout=60000)
             await asyncio.sleep(random.uniform(5, 10))
             
-            # Scrape threads
             threads = await page.evaluate('''() => {
                 const topics = Array.from(document.querySelectorAll('.forum_topic'));
                 return topics.map(t => ({
@@ -96,14 +84,12 @@ async def scrape_steam_forum():
             }''')
             
             for thread in threads:
-                if thread['url']:
-                    title = thread['title'] if thread['title'] else "Unknown Thread"
+                if thread['url'] and thread['title']:
                     cursor.execute('INSERT OR IGNORE INTO threads (board_id, title, url) VALUES (?, ?, ?)', 
-                                   (board_id, title, thread['url']))
+                                   (board_id, thread['title'], thread['url']))
                     conn.commit()
                     thread_id = cursor.execute('SELECT id FROM threads WHERE url=?', (thread['url'],)).fetchone()[0]
-                    
-                    await scrape_steam_thread(thread['url'], thread_id, cursor, conn)
+                    await scrape_steam_thread(thread['url'], thread_id)
         
         await browser.close()
     conn.close()
