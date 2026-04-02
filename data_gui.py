@@ -81,6 +81,46 @@ class MatrixApp(ctk.CTk):
         self.current_table = None
         self.page = 0
         self.limit = 50
+        self.chat_history = []
+
+    def search_databases(self, query):
+        results = []
+        dbs = {"rising_world_forum.db": ["posts", "threads"], "rising_world_members.db": ["members"]}
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        for db_name, tables in dbs.items():
+            db_path = os.path.join(project_dir, db_name)
+            if not os.path.exists(db_path): continue
+            
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            existing_tables = [t[0] for t in cursor.fetchall()]
+            
+            for table in tables:
+                if table in existing_tables:
+                    try:
+                        cursor.execute(f"PRAGMA table_info({table})")
+                        cols = [info[1] for info in cursor.fetchall()]
+                        search_cols = [c for c in cols if c in ['content', 'author', 'title', 'username', 'timestamp', 'member_since']]
+                        
+                        # Perform a wider keyword search across all text/time columns
+                        where_clause = " OR ".join([f"{c} LIKE ?" for c in search_cols])
+                        search_params = [f"%{query}%"] * len(search_cols)
+                        
+                        # Fetch more records to provide better context
+                        df = pd.read_sql_query(f"SELECT * FROM {table} WHERE {where_clause} ORDER BY rowid DESC LIMIT 50", conn, params=search_params)
+                        
+                        # If no keyword matches, fetch the overall latest context
+                        if df.empty:
+                            df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT 20", conn)
+                        
+                        if not df.empty:
+                            results.append(f"From {db_name} ({table}) - Search Context:\n{df.to_string()}")
+                    except Exception as e:
+                        print(f"DEBUG: Search error: {e}")
+            conn.close()
+        return "\n".join(results) if results else "No historical or recent data found."
 
     def load_db_data(self, db_name):
         self.current_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_name)
@@ -92,30 +132,22 @@ class MatrixApp(ctk.CTk):
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = [t[0] for t in cursor.fetchall()]
-        
-        if 'threads' in tables:
-            self.current_table = 'threads'
-        elif tables:
-            self.current_table = tables[0]
-        else:
-            self.current_table = None
-        
-        if self.current_table:
-            self.update_view()
+        if 'threads' in tables: self.current_table = 'threads'
+        elif tables: self.current_table = tables[0]
+        else: self.current_table = None
+        if self.current_table: self.update_view()
         conn.close()
 
     def update_view(self):
         conn = sqlite3.connect(self.current_db)
         query = f"SELECT * FROM {self.current_table} LIMIT {self.limit} OFFSET {self.page * self.limit}"
         df = pd.read_sql_query(query, conn)
-        
         for i in self.tree.get_children(): self.tree.delete(i)
         self.tree["columns"] = list(df.columns)
         for col in df.columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=100)
-        for _, row in df.iterrows():
-            self.tree.insert("", "end", values=list(row))
+        for _, row in df.iterrows(): self.tree.insert("", "end", values=list(row))
         self.page_label.configure(text=f"Page {self.page + 1}")
         conn.close()
 
@@ -124,40 +156,27 @@ class MatrixApp(ctk.CTk):
         self.update_view()
 
     def prev_page(self):
-        if self.page > 0:
-            self.page -= 1
-            self.update_view()
+        if self.page > 0: self.page -= 1
+        self.update_view()
 
     def on_tree_select(self, event):
         selected_item = self.tree.selection()
         if not selected_item: return
         item_data = self.tree.item(selected_item[0])['values']
-        
-        print(f"DEBUG: Selected table: {self.current_table}, Selected row: {item_data}")
-        
-        # If in 'threads' table, drill down to 'posts'
-        if self.current_table == 'threads':
-            thread_id = item_data[0] # Assuming first col is id
-            self.drill_down_to_posts(thread_id)
-        # If in 'posts' table, show content
-        elif self.current_table == 'posts':
-            self.show_post_content(item_data)
-        else:
-            self.show_default_details(item_data)
+        if self.current_table == 'threads': self.drill_down_to_posts(item_data[0])
+        elif self.current_table == 'posts': self.show_post_content(item_data)
+        else: self.show_default_details(item_data)
 
     def drill_down_to_posts(self, thread_id):
         self.current_table = 'posts'
         conn = sqlite3.connect(self.current_db)
-        query = f"SELECT * FROM posts WHERE thread_id={thread_id}"
-        df = pd.read_sql_query(query, conn)
-        
+        df = pd.read_sql_query(f"SELECT * FROM posts WHERE thread_id={thread_id}", conn)
         for i in self.tree.get_children(): self.tree.delete(i)
         self.tree["columns"] = list(df.columns)
         for col in df.columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=150)
-        for _, row in df.iterrows():
-            self.tree.insert("", "end", values=list(row))
+        for _, row in df.iterrows(): self.tree.insert("", "end", values=list(row))
         conn.close()
 
     def show_post_content(self, post_data):
@@ -181,17 +200,35 @@ class MatrixApp(ctk.CTk):
         self.chat_display.insert("end", f"USER: {user_query}\n")
         self.chat_input.delete(0, "end")
         
+        # RAG Search: Keyword matching with fallback to recent history
+        db_context = self.search_databases(user_query)
+        self.chat_history.append({"role": "user", "content": user_query})
+        
         try:
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            # Using the requested model
+            # Specifically instruct the AI to parse dates and rank records
+            prompt = f"""
+You are a database analysis assistant for Rising World.
+Analyze the following DATABASE RESULTS carefully. Pay attention to dates (e.g., 'member_since' or 'timestamp') and sort them chronologically to answer the user accurately. 
+If asked for 'latest' or 'first' records, identify the highest/lowest date values in the provided data.
+
+DATABASE RESULTS:
+{db_context}
+
+CHAT HISTORY:
+{self.chat_history}
+
+USER QUERY:
+{user_query}
+"""
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
-                contents=f"You are a database analysis assistant for Rising World. Answer based on this context: {user_query}",
+                contents=prompt,
             )
+            self.chat_history.append({"role": "assistant", "content": response.text})
             self.chat_display.insert("end", f"AI: {response.text}\n\n")
         except Exception as e:
             self.chat_display.insert("end", f"ERROR: Could not contact Gemini: {e}\n\n")
-            print(f"DEBUG: Gemini API error: {e}")
 
     def run_updates_terminal(self):
         project_dir = os.path.dirname(os.path.abspath(__file__))
