@@ -87,40 +87,38 @@ class MatrixApp(ctk.CTk):
         results = []
         dbs = {"rising_world_forum.db": ["posts", "threads"], "rising_world_members.db": ["members"]}
         project_dir = os.path.dirname(os.path.abspath(__file__))
+        sort_order = "ASC" if any(w in query.lower() for w in ["oldest", "first", "earliest"]) else "DESC"
         
         for db_name, tables in dbs.items():
             db_path = os.path.join(project_dir, db_name)
             if not os.path.exists(db_path): continue
             
             conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            existing_tables = [t[0] for t in cursor.fetchall()]
-            
             for table in tables:
-                if table in existing_tables:
-                    try:
-                        cursor.execute(f"PRAGMA table_info({table})")
-                        cols = [info[1] for info in cursor.fetchall()]
-                        search_cols = [c for c in cols if c in ['content', 'author', 'title', 'username', 'timestamp', 'member_since']]
+                try:
+                    if table == 'members':
+                        query_str = f"""
+                            SELECT * FROM {table} 
+                            ORDER BY 
+                                CAST(substr(member_since, -4) AS INTEGER) {sort_order},
+                                CASE substr(member_since, 1, 3) 
+                                    WHEN 'Jan' THEN 1 WHEN 'Feb' THEN 2 WHEN 'Mar' THEN 3 WHEN 'Apr' THEN 4
+                                    WHEN 'May' THEN 5 WHEN 'Jun' THEN 6 WHEN 'Jul' THEN 7 WHEN 'Aug' THEN 8
+                                    WHEN 'Sep' THEN 9 WHEN 'Oct' THEN 10 WHEN 'Nov' THEN 11 WHEN 'Dec' THEN 12 
+                                END {sort_order},
+                                CAST(substr(member_since, 5, 2) AS INTEGER) {sort_order}
+                            LIMIT 15
+                        """
+                        df = pd.read_sql_query(query_str, conn)
+                    else:
+                        df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY rowid {sort_order} LIMIT 15", conn)
                         
-                        # Perform a wider keyword search across all text/time columns
-                        where_clause = " OR ".join([f"{c} LIKE ?" for c in search_cols])
-                        search_params = [f"%{query}%"] * len(search_cols)
-                        
-                        # Fetch more records to provide better context
-                        df = pd.read_sql_query(f"SELECT * FROM {table} WHERE {where_clause} ORDER BY rowid DESC LIMIT 50", conn, params=search_params)
-                        
-                        # If no keyword matches, fetch the overall latest context
-                        if df.empty:
-                            df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT 20", conn)
-                        
-                        if not df.empty:
-                            results.append(f"From {db_name} ({table}) - Search Context:\n{df.to_string()}")
-                    except Exception as e:
-                        print(f"DEBUG: Search error: {e}")
+                    if not df.empty:
+                        results.append(f"Source: {db_name}, Table: {table}\n{df.to_string(index=False)}")
+                except Exception as e:
+                    print(f"DEBUG: Search error: {e}")
             conn.close()
-        return "\n".join(results) if results else "No historical or recent data found."
+        return "\n---\n".join(results) if results else "No data found."
 
     def load_db_data(self, db_name):
         self.current_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_name)
@@ -200,27 +198,12 @@ class MatrixApp(ctk.CTk):
         self.chat_display.insert("end", f"USER: {user_query}\n")
         self.chat_input.delete(0, "end")
         
-        # RAG Search: Keyword matching with fallback to recent history
         db_context = self.search_databases(user_query)
         self.chat_history.append({"role": "user", "content": user_query})
         
         try:
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            # Specifically instruct the AI to parse dates and rank records
-            prompt = f"""
-You are a database analysis assistant for Rising World.
-Analyze the following DATABASE RESULTS carefully. Pay attention to dates (e.g., 'member_since' or 'timestamp') and sort them chronologically to answer the user accurately. 
-If asked for 'latest' or 'first' records, identify the highest/lowest date values in the provided data.
-
-DATABASE RESULTS:
-{db_context}
-
-CHAT HISTORY:
-{self.chat_history}
-
-USER QUERY:
-{user_query}
-"""
+            prompt = f"You are an expert analyst. Answer strictly from these results. If answer not present, say 'No information found':\n{db_context}\n\nQuery: {user_query}"
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
                 contents=prompt,
